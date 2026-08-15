@@ -1,0 +1,10 @@
+tensorflow
+tensorflow-hub
+numpy
+scipy
+sounddevice
+websockets
+soundfile
+librosa
+scikit-learn
+setuptools<81
