@@ -1,0 +1,11 @@
+venv/
+data/_raw/
+data/organized/
+data/embeddings.npz
+__pycache__/
+*.pyc
+*.wav
+*.zip
+.DS_Store
+*.egg-info/
+.ipynb_checkpoints/
