@@ -40,6 +40,18 @@ PRIORITY_MAP = {
     "background": None,  # never alert on background
 }
 
+# Minimum confidence required before we alert on a class. Set per-class based on
+# validation performance -- classes with lower precision (more false positives)
+# get a higher bar. Tune these after re-running eval; these are reasonable starting
+# points from the confusion matrix (background was frequently misread as impact_crash
+# and siren_traffic).
+CONFIDENCE_THRESHOLDS = {
+    "scream_distress": 0.55,   # high recall/precision already, keep bar low
+    "explosion": 0.60,
+    "impact_crash": 0.75,      # weak precision (50%), raise the bar significantly
+    "siren_traffic": 0.70,     # weak precision (65%), raise the bar
+}
+
 # Rolling audio buffer so we can grab audio from just BEFORE the trigger fired too,
 # not just after -- Stage 1 detects the spike, but the interesting audio often starts
 # slightly earlier in the block.
@@ -103,6 +115,12 @@ def make_alert(label, confidence):
     priority = PRIORITY_MAP.get(label)
     if priority is None:
         return None  # background, no alert
+
+    threshold = CONFIDENCE_THRESHOLDS.get(label, 0.5)
+    if confidence < threshold:
+        print(f"[Stage 2] {label} confidence {confidence:.3f} below threshold {threshold}, suppressing alert.")
+        return None
+
     return {
         "node_id": NODE_ID,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
