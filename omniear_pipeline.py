@@ -9,6 +9,16 @@ Flow:
 Run: python omniear_pipeline.py
 """
 
+import os
+# Suppress TensorFlow/absl/CUDA log noise before importing tensorflow.
+# We run CPU-only intentionally (no GPU on this machine), so the CUDA
+# "could not find drivers" messages are expected and not useful to show.
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # 0=all, 1=info, 2=warning, 3=error only
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # explicitly disable GPU lookup, silences cuInit errors
+
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="tensorflow_hub")
+
 import time
 import json
 import collections
@@ -133,6 +143,8 @@ def make_alert(label, confidence):
 
 
 def main():
+    tf.get_logger().setLevel("ERROR")
+
     print("Loading YAMNet...")
     yamnet = hub.load("https://tfhub.dev/google/yamnet/1")
     print("Loading classifier...")

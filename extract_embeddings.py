@@ -9,6 +9,12 @@ Output: data/embeddings.npz  (X = embeddings, y = labels, classes = class names)
 """
 
 import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="tensorflow_hub")
+
 import numpy as np
 import tensorflow as tf
 import tensorflow_hub as hub
