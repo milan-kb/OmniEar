@@ -15,7 +15,7 @@ import os
 import json
 import numpy as np
 import tensorflow as tf
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import classification_report, confusion_matrix
 
@@ -49,19 +49,43 @@ def main():
     y = data["y"]
     classes = list(data["classes"])
 
+    if "groups" not in data:
+        raise RuntimeError(
+            "embeddings.npz has no 'groups' array -- re-run extract_embeddings.py "
+            "with the updated script before training, or augmented clips may leak "
+            "across train/test splits and inflate your metrics."
+        )
+    groups = data["groups"]
+
     print(f"X shape: {X.shape}, y shape: {y.shape}")
     print(f"Classes: {classes}")
+    print(f"Unique groups (original clips): {len(set(groups))}")
     print("\nClass distribution:")
     for i, cls in enumerate(classes):
         print(f"  {cls}: {np.sum(y == i)}")
 
-    # Train/val/test split, stratified to preserve class proportions
-    X_train, X_temp, y_train, y_temp = train_test_split(
-        X, y, test_size=0.3, random_state=42, stratify=y
-    )
-    X_val, X_test, y_val, y_test = train_test_split(
-        X_temp, y_temp, test_size=0.5, random_state=42, stratify=y_temp
-    )
+    # Group-aware split: all augmented variants of a clip stay together with
+    # their original in the same split, so the model is never tested on a
+    # pitch-shifted/time-stretched copy of something it trained on.
+    gss1 = GroupShuffleSplit(n_splits=1, test_size=0.3, random_state=42)
+    train_idx, temp_idx = next(gss1.split(X, y, groups=groups))
+    X_train, y_train, groups_train = X[train_idx], y[train_idx], groups[train_idx]
+    X_temp, y_temp, groups_temp = X[temp_idx], y[temp_idx], groups[temp_idx]
+
+    gss2 = GroupShuffleSplit(n_splits=1, test_size=0.5, random_state=42)
+    val_idx, test_idx = next(gss2.split(X_temp, y_temp, groups=groups_temp))
+    X_val, y_val = X_temp[val_idx], y_temp[val_idx]
+    X_test, y_test = X_temp[test_idx], y_temp[test_idx]
+
+    # Sanity check: confirm no group overlaps between splits
+    train_groups = set(groups_train)
+    val_groups = set(groups_temp[val_idx])
+    test_groups = set(groups_temp[test_idx])
+    assert not (train_groups & val_groups), "Group leak between train and val!"
+    assert not (train_groups & test_groups), "Group leak between train and test!"
+    assert not (val_groups & test_groups), "Group leak between val and test!"
+    print("\nGroup-split sanity check passed: no original clip appears in more than one split.")
+
     print(f"\nTrain: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
 
     # Class weights to counter imbalance

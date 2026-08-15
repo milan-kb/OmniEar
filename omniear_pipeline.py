@@ -23,6 +23,7 @@ import time
 import json
 import collections
 import threading
+import queue
 import asyncio
 import numpy as np
 import sounddevice as sd
@@ -33,7 +34,12 @@ import websockets
 from stage1_trigger import Stage1Trigger, SAMPLE_RATE
 
 # ---- Config ----
-CAPTURE_SECONDS = 2.0          # how much audio to grab for Stage 2 once Stage 1 fires
+# Must match WINDOW_SECONDS in extract_embeddings.py -- training and live
+# inference need to see the same size of audio window, otherwise the
+# classifier sees a different embedding distribution live than what it
+# was trained on.
+WINDOW_SECONDS = 2.5
+WINDOW_SAMPLES = int(SAMPLE_RATE * WINDOW_SECONDS)
 MODEL_PATH = "models/classifier.keras"
 CLASSES_PATH = "models/classes.json"
 NODE_ID = "AE-01"
@@ -105,16 +111,74 @@ class DashboardConnection:
             await asyncio.sleep(3)
 
     def send_alert(self, alert_dict):
-        if self.ws is None:
+        ws = self.ws  # snapshot to avoid a race between the None check and use
+        if ws is None:
             print("[Dashboard] Not connected, alert NOT sent (printed locally only).")
             return
         message = json.dumps(alert_dict)
-        asyncio.run_coroutine_threadsafe(self.ws.send(message), self.loop)
+        future = asyncio.run_coroutine_threadsafe(self._safe_send(ws, message), self.loop)
+        future.add_done_callback(self._log_send_result)
+
+    async def _safe_send(self, ws, message):
+        await ws.send(message)
+
+    def _log_send_result(self, future):
+        exc = future.exception()
+        if exc is not None:
+            print(f"[Dashboard] Send failed: {exc}")
+
+
+def extract_loudest_window(waveform, window_samples):
+    """
+    Same logic as extract_embeddings.py's version -- pick the window_samples-long
+    slice centered on the loudest region. Must stay in sync with that function
+    so training and inference see comparably-processed audio.
+    """
+    if len(waveform) <= window_samples:
+        pad = window_samples - len(waveform)
+        pad_left = pad // 2
+        pad_right = pad - pad_left
+        return np.pad(waveform, (pad_left, pad_right), mode="constant")
+
+    frame_size = SAMPLE_RATE // 10
+    n_frames = len(waveform) // frame_size
+    if n_frames == 0:
+        return waveform[:window_samples]
+
+    frame_energies = np.array([
+        np.sqrt(np.mean(waveform[i * frame_size:(i + 1) * frame_size].astype(np.float64) ** 2))
+        for i in range(n_frames)
+    ])
+
+    window_frames = max(1, window_samples // frame_size)
+    if n_frames <= window_frames:
+        center_frame = n_frames // 2
+    else:
+        cumsum = np.cumsum(np.insert(frame_energies, 0, 0))
+        window_sums = cumsum[window_frames:] - cumsum[:-window_frames]
+        best_start_frame = int(np.argmax(window_sums))
+        center_frame = best_start_frame + window_frames // 2
+
+    center_sample = center_frame * frame_size
+    start = max(0, center_sample - window_samples // 2)
+    end = start + window_samples
+    if end > len(waveform):
+        end = len(waveform)
+        start = max(0, end - window_samples)
+
+    windowed = waveform[start:end]
+    if len(windowed) < window_samples:
+        windowed = np.pad(windowed, (0, window_samples - len(windowed)), mode="constant")
+    return windowed
 
 
 def classify_audio(waveform, yamnet, classifier, classes):
-    """Run YAMNet + classifier on a waveform, return (label, confidence)."""
-    scores, embeddings, spectrogram = yamnet(waveform)
+    """Run YAMNet + classifier on a waveform, return (label, confidence).
+    Raises on failure -- caller is responsible for catching, since a bad
+    waveform (e.g. buffer underrun producing silence/NaNs) should not be
+    allowed to crash the pipeline."""
+    windowed = extract_loudest_window(waveform, WINDOW_SAMPLES)
+    scores, embeddings, spectrogram = yamnet(windowed)
     clip_embedding = np.mean(embeddings.numpy(), axis=0, keepdims=True)
     probs = classifier.predict(clip_embedding, verbose=0)[0]
     top_idx = int(np.argmax(probs))
@@ -154,32 +218,47 @@ def main():
 
     print(f"Connecting to dashboard at {DASHBOARD_WS_URL}...")
     dashboard = DashboardConnection(DASHBOARD_WS_URL)
-    time.sleep(1)  # give the connection a moment to establish before we start
+
+    inference_queue = queue.Queue()
 
     def audio_ring_callback(indata, frames, time_info, status):
         with buffer_lock:
             ring_buffer.extend(indata[:, 0].copy())
 
     def on_trigger(energy, timestamp):
-        print(f"\n[Stage 1] Trigger fired (energy={energy:.4f}). Running Stage 2...")
-
-        # Grab the current ring buffer contents as our capture window
+        # This runs on the PortAudio real-time thread -- must return FAST.
+        # Snapshot the buffer and hand off to the inference worker thread;
+        # do NOT run YAMNet/classifier here, that would block audio capture
+        # and cause dropped frames / a stale Stage 1 baseline.
         with buffer_lock:
             waveform = np.array(ring_buffer, dtype=np.float32)
+        inference_queue.put((waveform, energy, timestamp))
 
-        if len(waveform) < SAMPLE_RATE * 0.5:
-            print("[Stage 2] Not enough audio buffered yet, skipping.")
-            return
+    def inference_worker():
+        while True:
+            waveform, energy, timestamp = inference_queue.get()
+            print(f"\n[Stage 1] Trigger fired (energy={energy:.4f}). Running Stage 2...")
 
-        label, confidence = classify_audio(waveform, yamnet, classifier, classes)
-        print(f"[Stage 2] Classified as: {label} (confidence={confidence:.3f})")
+            if len(waveform) < SAMPLE_RATE * 0.5:
+                print("[Stage 2] Not enough audio buffered yet, skipping.")
+                continue
 
-        alert = make_alert(label, confidence)
-        if alert:
-            print(f"[ALERT] {json.dumps(alert)}")
-            dashboard.send_alert(alert)
-        else:
-            print("[Stage 2] Classified as background, no alert generated.")
+            try:
+                label, confidence = classify_audio(waveform, yamnet, classifier, classes)
+            except Exception as e:
+                print(f"[Stage 2] Classification failed ({e}), skipping this trigger.")
+                continue
+
+            print(f"[Stage 2] Classified as: {label} (confidence={confidence:.3f})")
+
+            alert = make_alert(label, confidence)
+            if alert:
+                print(f"[ALERT] {json.dumps(alert)}")
+                dashboard.send_alert(alert)
+            else:
+                print("[Stage 2] Classified as background, no alert generated.")
+
+    threading.Thread(target=inference_worker, daemon=True).start()
 
     trigger = Stage1Trigger(on_trigger=on_trigger)
 
@@ -195,6 +274,7 @@ def main():
         samplerate=SAMPLE_RATE,
         channels=1,
         blocksize=int(SAMPLE_RATE * 0.1),
+        dtype="float32",
         callback=combined_callback,
     ):
         try:
