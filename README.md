@@ -2,7 +2,7 @@
 
 Edge-AI acoustic threat detection — listens for distress/emergency sounds (screams, explosions, impacts, sirens) and generates structured alerts without ever recording or transmitting raw audio.
 
-Built for [hackathon name] as a technical proof-of-concept demonstrating the core detection pipeline from AcousticEdge / OmniEar's PRD.
+Built for [hackathon name] as a technical proof-of-concept demonstrating the core detection pipeline from OmniEar's PRD.
 
 ## Architecture
 
