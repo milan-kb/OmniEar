@@ -88,10 +88,13 @@ python train_classifier.py        # trains classifier -> models/classifier.keras
 
 **3. Run the live pipeline:**
 ```bash
-# Terminal 1 - mock dashboard (or point at the real one)
+# Terminal 1 - WebSocket relay used by the included frontend
 python mock_dashboard_listener.py
 
-# Terminal 2 - the actual pipeline
+# Terminal 2 - frontend (from acoustic-insight-sentinel)
+npm run dev
+
+# Terminal 3 - the actual pipeline
 python omniear_pipeline.py
 ```
 
@@ -100,7 +103,9 @@ python omniear_pipeline.py
 - False-positive rates not yet validated against chaotic real-world Indian soundscapes (festival noise, street vendors, etc.) — validated only against clean dataset audio and live personal testing so far.
 - `impact_crash` and `siren_traffic` classes have less training data than `background`/`scream_distress` even after augmentation; precision is improving but not yet production-grade.
 - Hardware (ESP32/Pi node, GSM, solar) is not implemented for this demo — the pipeline runs on a laptop as a stand-in for the edge node, per architectural discussion in the PRD.
-- Dashboard integration and physical LED/hardware trigger are built by teammates and integrate via the WebSocket JSON contract documented above.
+- The included dashboard receives live JSON alerts through `mock_dashboard_listener.py`, which
+  relays messages from the pipeline client to browser clients. Physical LED/hardware triggers are
+  not implemented.
 
 ## Team
 
