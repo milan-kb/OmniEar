@@ -66,18 +66,30 @@ PRIORITY_MAP = {
 # points from the confusion matrix (background was frequently misread as impact_crash
 # and siren_traffic).
 CONFIDENCE_THRESHOLDS = {
-    "scream_distress": 0.55,   # high recall/precision already, keep bar low
-    "explosion": 0.60,
-    "impact_crash": 0.65,      # lowered from 0.75 -- live testing showed correct
-                                # classifications consistently landing 0.65-0.74,
-                                # getting needlessly suppressed
-    "siren_traffic": 0.65,     # lowered from 0.70 for the same reason, pending
-                                # live validation
+    "scream_distress": 0.40,   # lowered from 0.55 for earphone mic demo conditions
+    "explosion": 0.45,         # lowered from 0.60
+    "impact_crash": 0.45,      # lowered from 0.65
+    "siren_traffic": 0.45,     # lowered from 0.65
+}
+
+# Inference-time calibration to counteract training class weight bias.
+# train_classifier.py used compute_class_weight("balanced"), which gave:
+#   background ~0.4x, scream ~0.6x, siren ~2x, explosion ~10x, impact ~11x
+# This makes the model aggressively predict minority classes on ambiguous /
+# out-of-distribution input (like speaker-to-mic captured YouTube audio).
+# These correction factors re-balance inference toward the true class prior.
+# Multiply raw softmax probabilities by these, then renormalize.
+CLASS_CALIBRATION = {
+    "background":      2.5,    # was down-weighted in training, boost back up
+    "scream_distress": 1.0,    # roughly balanced already
+    "siren_traffic":   0.5,    # was over-weighted ~2x in training
+    "explosion":       0.25,   # was over-weighted ~10x in training
+    "impact_crash":    0.25,   # was over-weighted ~11x in training
 }
 
 # Set True temporarily while calibrating thresholds against your actual demo
-# playback setup (phone speaker, room, distance). Just changes what gets
-# printed -- does not affect whether alerts actually fire.
+# playback setup (phone speaker, room, distance). Prints all class
+# probabilities (raw + calibrated) on every trigger for live debugging.
 DEBUG_LOG_ALL_CONFIDENCES = True
 
 # Rolling audio buffer so we can grab audio from just BEFORE the trigger fired too,
@@ -200,17 +212,30 @@ def extract_loudest_window(waveform, window_samples):
 
 def classify_audio(waveform, yamnet, classifier, classes):
     """Run YAMNet + classifier on a waveform, return (label, confidence).
+    Applies inference-time calibration to counteract training class weight
+    bias, then returns (label, calibrated_confidence).
     Raises on failure -- caller is responsible for catching, since a bad
     waveform (e.g. buffer underrun producing silence/NaNs) should not be
     allowed to crash the pipeline."""
     windowed = extract_loudest_window(waveform, WINDOW_SAMPLES)
     _, embeddings, _ = yamnet(windowed)
-    # Keep the hot path in TensorFlow. Converting embeddings to NumPy and then
-    # back to a tensor for model.predict adds copies and data-adapter overhead.
     clip_embedding = tf.reduce_mean(embeddings, axis=0, keepdims=True)
-    probs = classifier(clip_embedding, training=False)[0]
-    top_idx = int(tf.argmax(probs).numpy())
-    return classes[top_idx], float(probs[top_idx].numpy())
+    raw_probs = classifier(clip_embedding, training=False)[0].numpy()
+
+    # Apply calibration: multiply each class probability by its correction
+    # factor, then renormalize so they still sum to 1.0.
+    cal_weights = np.array([CLASS_CALIBRATION.get(c, 1.0) for c in classes], dtype=np.float32)
+    calibrated = raw_probs * cal_weights
+    calibrated = calibrated / calibrated.sum()
+
+    if DEBUG_LOG_ALL_CONFIDENCES:
+        print("[Stage 2] Class probabilities (raw -> calibrated):")
+        for i, c in enumerate(classes):
+            marker = "  <<<" if i == int(np.argmax(calibrated)) else ""
+            print(f"    {c:20s}  {raw_probs[i]:.4f} -> {calibrated[i]:.4f}{marker}")
+
+    top_idx = int(np.argmax(calibrated))
+    return classes[top_idx], float(calibrated[top_idx])
 
 
 def make_alert(label, confidence):
@@ -301,7 +326,10 @@ def main():
                 dashboard.send_alert(alert)
                 threading.Thread(target=notify_pi_led, args=(alert,), daemon=True).start()
             else:
-                print("[Stage 2] Classified as background, no alert generated.")
+                if label == "background":
+                    print("[Stage 2] Classified as background, no alert generated.")
+                else:
+                    print(f"[Stage 2] {label} below confidence threshold, no alert generated.")
 
     threading.Thread(target=inference_worker, daemon=True).start()
 

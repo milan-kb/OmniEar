@@ -19,10 +19,15 @@ BLOCK_DURATION = 0.1         # seconds per audio block analyzed
 BLOCK_SIZE = int(SAMPLE_RATE * BLOCK_DURATION)
 
 BASELINE_WINDOW = 50         # number of blocks (~5s) used to compute rolling baseline
-THRESHOLD_MULTIPLIER = 6.0   # trigger fires when energy > baseline * this multiplier
-MIN_ABSOLUTE_ENERGY = 0.02   # hard floor -- ignore anything below this regardless of baseline
-MIN_BASELINE_BLOCKS = 20     # don't trigger until we've seen enough blocks to estimate baseline
-COOLDOWN_SECONDS = 1.5       # minimum time between consecutive triggers, avoids spamming
+THRESHOLD_MULTIPLIER = 3.0   # trigger fires when energy > baseline * this multiplier
+                             # balanced: low enough for earphone taps, high enough to ignore speech
+MIN_ABSOLUTE_ENERGY = 0.005  # hard floor -- lowered from 0.02 for earphone mic sensitivity
+MIN_BASELINE_BLOCKS = 10     # don't trigger until we've seen enough blocks to estimate baseline
+                             # ~1s calibration, faster startup for demo
+COOLDOWN_SECONDS = 0.8       # minimum time between consecutive triggers, lowered for snappy demo
+SPIKE_RATIO = 3.0            # current block must be >= 3x previous block energy
+                             # taps/smacks spike instantly (ratio 5-20x), speech ramps gradually (~1.2x)
+HIGH_ENERGY_BYPASS = 5.0     # skip spike check if energy > baseline * this (genuinely loud events)
 
 
 class Stage1Trigger:
@@ -38,6 +43,7 @@ class Stage1Trigger:
         self.energy_sum = 0.0
         self.last_trigger_time = 0
         self.block_count = 0
+        self.prev_energy = 0.0  # track previous block for spike ratio detection
 
     def _default_trigger(self, energy, timestamp):
         print(f"[TRIGGER] energy={energy:.4f} at t={timestamp:.2f}s")
@@ -62,8 +68,16 @@ class Stage1Trigger:
 
             now = time.time()
             if energy > threshold and (now - self.last_trigger_time) > COOLDOWN_SECONDS:
-                self.last_trigger_time = now
-                self.on_trigger(energy, now)
+                # Distinguish impulsive sounds (taps, claps, smacks) from gradual
+                # ramp-ups (speech, ambient drift). A tap jumps from near-zero to
+                # high in one 100ms block; speech rises gently over several blocks.
+                spike = (energy / self.prev_energy) if self.prev_energy > 1e-8 else float('inf')
+                is_impulse = spike >= SPIKE_RATIO
+                is_very_loud = energy > max(baseline * HIGH_ENERGY_BYPASS, MIN_ABSOLUTE_ENERGY)
+
+                if is_impulse or is_very_loud:
+                    self.last_trigger_time = now
+                    self.on_trigger(energy, now)
 
         # Plain rolling baseline -- always record, deque maxlen handles the windowing.
         # Occasional loud blocks slightly nudging the baseline is fine and self-corrects
@@ -73,12 +87,13 @@ class Stage1Trigger:
             self.energy_sum -= self.energy_history[0]
         self.energy_history.append(energy)
         self.energy_sum += energy
+        self.prev_energy = energy
 
     def run(self, duration=None):
         """Start listening. Blocks until duration expires or KeyboardInterrupt."""
         print(f"Stage 1 listening on device={self.device or 'default'} ...")
         print(f"Sample rate: {SAMPLE_RATE} Hz, block size: {BLOCK_SIZE} samples ({BLOCK_DURATION}s)")
-        print("Calibrating baseline for the first ~2 seconds, stay quiet...")
+        print("Calibrating baseline for the first ~1 second, stay quiet...")
         print("Press Ctrl+C to stop.\n")
 
         with sd.InputStream(
