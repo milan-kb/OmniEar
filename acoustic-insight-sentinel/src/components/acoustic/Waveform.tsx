@@ -1,16 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-
-export function useReducedMotion() {
-  const [reduced, setReduced] = useState(false);
-  useEffect(() => {
-    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
-    setReduced(mq.matches);
-    const on = () => setReduced(mq.matches);
-    mq.addEventListener("change", on);
-    return () => mq.removeEventListener("change", on);
-  }, []);
-  return reduced;
-}
+import { useCallback, useEffect, useId, useMemo, useRef } from "react";
+import { useReducedMotion } from "@/hooks/use-reduced-motion";
 
 const N = 220;
 
@@ -41,15 +30,45 @@ export function Waveform({
   className?: string;
 }) {
   const reduced = useReducedMotion();
-  const [t, setT] = useState(0);
   const raf = useRef<number | null>(null);
+  const lineRef = useRef<SVGPolylineElement>(null);
+  const fillRef = useRef<SVGPolygonElement>(null);
+  const gradientId = useId().replaceAll(":", "");
+  const w = 1000;
+
+  const pointsAt = useCallback(
+    (t: number) => {
+      const mid = height / 2;
+      const points: string[] = [];
+      for (let i = 0; i < N; i++) {
+        const x = (i / (N - 1)) * w;
+        const env = Math.sin((i / N) * Math.PI);
+        const wave =
+          Math.sin(i * 0.22 + t) * 0.5 +
+          Math.sin(i * 0.09 - t * 0.7) * 0.32 +
+          Math.sin(i * 0.55 + t * 1.7) * 0.18;
+        const waveY = mid - wave * env * amplitude * (idle ? 4 : mid * 0.72);
+        const skyY = height - skylineAt(i) * height * 0.82;
+        const y = waveY * (1 - morph) + skyY * morph;
+        points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+      }
+      return points.join(" ");
+    },
+    [amplitude, height, idle, morph],
+  );
+
+  const initialPoints = useMemo(() => pointsAt(0), [pointsAt]);
 
   useEffect(() => {
     if (reduced || idle) return;
     let last = 0;
+    let phase = 0;
     const loop = (ts: number) => {
       if (ts - last > 33) {
-        setT((v) => v + 0.06);
+        phase += 0.06;
+        const points = pointsAt(phase);
+        lineRef.current?.setAttribute("points", points);
+        fillRef.current?.setAttribute("points", `${points} ${w},${height} 0,${height}`);
         last = ts;
       }
       raf.current = requestAnimationFrame(loop);
@@ -58,25 +77,7 @@ export function Waveform({
     return () => {
       if (raf.current) cancelAnimationFrame(raf.current);
     };
-  }, [reduced, idle]);
-
-  const w = 1000;
-  const mid = height / 2;
-  const pts: string[] = [];
-  const base: string[] = [];
-  for (let i = 0; i < N; i++) {
-    const x = (i / (N - 1)) * w;
-    const env = Math.sin((i / N) * Math.PI);
-    const wave =
-      Math.sin(i * 0.22 + t) * 0.5 +
-      Math.sin(i * 0.09 - t * 0.7) * 0.32 +
-      Math.sin(i * 0.55 + t * 1.7) * 0.18;
-    const waveY = mid - wave * env * amplitude * (idle ? 4 : mid * 0.72);
-    const skyY = height - skylineAt(i) * height * 0.82;
-    const y = waveY * (1 - morph) + skyY * morph;
-    pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
-    base.push(`${x.toFixed(1)},${height}`);
-  }
+  }, [height, idle, pointsAt, reduced]);
 
   return (
     <svg
@@ -87,14 +88,19 @@ export function Waveform({
       style={{ width: "100%", height }}
     >
       <defs>
-        <linearGradient id="ae-wave-fill" x1="0" y1="0" x2="0" y2="1">
+        <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor={color} stopOpacity={0.28} />
           <stop offset="100%" stopColor={color} stopOpacity={0} />
         </linearGradient>
       </defs>
-      <polygon points={`${pts.join(" ")} ${w},${height} 0,${height}`} fill="url(#ae-wave-fill)" />
+      <polygon
+        ref={fillRef}
+        points={`${initialPoints} ${w},${height} 0,${height}`}
+        fill={`url(#${gradientId})`}
+      />
       <polyline
-        points={pts.join(" ")}
+        ref={lineRef}
+        points={initialPoints}
         fill="none"
         stroke={color}
         strokeWidth={2}

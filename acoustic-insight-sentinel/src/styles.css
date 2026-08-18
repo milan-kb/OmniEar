@@ -1,6 +1,5 @@
 @import "tailwindcss" source(none);
 @source "../src";
-@import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -167,8 +166,7 @@
 @utility city-surface {
   background:
     radial-gradient(1200px 700px at 20% 10%, rgba(63, 224, 197, 0.07), transparent 60%),
-    radial-gradient(900px 600px at 85% 80%, rgba(91, 141, 239, 0.09), transparent 60%),
-    var(--void);
+    radial-gradient(900px 600px at 85% 80%, rgba(91, 141, 239, 0.09), transparent 60%), var(--void);
 }
 
 @utility mono {
@@ -280,8 +278,15 @@
 }
 
 @keyframes ae-map-pulse {
-  0%, 100% { stroke-opacity: 1; fill-opacity: 0.9; }
-  50% { stroke-opacity: 0.45; fill-opacity: 0.55; }
+  0%,
+  100% {
+    stroke-opacity: 1;
+    fill-opacity: 0.9;
+  }
+  50% {
+    stroke-opacity: 0.45;
+    fill-opacity: 0.55;
+  }
 }
 
 @keyframes ae-pulse {
@@ -293,6 +298,51 @@
     transform: scale(2.6);
     opacity: 0;
   }
+}
+
+@keyframes ae-alert-in {
+  from {
+    opacity: 0;
+    transform: translateX(-12px);
+    filter: blur(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes ae-drawer-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes ae-p0-flash {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  18% {
+    opacity: 1;
+  }
+  55% {
+    opacity: 0.3;
+  }
+}
+
+.alert-row-enter {
+  animation: ae-alert-in 220ms ease-out both;
+}
+.incident-drawer-enter {
+  animation: ae-drawer-in 240ms ease-out both;
+}
+.p0-flash {
+  animation: ae-p0-flash 1.6s ease-out both;
 }
 
 @utility ping-ring {

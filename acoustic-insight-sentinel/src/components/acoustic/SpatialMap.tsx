@@ -15,7 +15,7 @@ export type SpatialMapProps = {
 
 const InteractiveSpatialMap = lazy(() => import("./InteractiveSpatialMap"));
 
-function MapLoadingState({ compact }: { compact?: boolean }) {
+function MapLoadingState({ compact }: { compact: boolean | undefined }) {
   return (
     <div className="city-surface hairline-grid flex size-full items-center justify-center">
       {!compact && (

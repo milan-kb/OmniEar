@@ -1,12 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
 import { Pause, Play } from "lucide-react";
 import { AppShell } from "@/components/acoustic/AppShell";
 import { AlertFeed } from "@/components/acoustic/AlertFeed";
 import { IncidentDrawer } from "@/components/acoustic/IncidentDrawer";
 import { SpatialMap } from "@/components/acoustic/SpatialMap";
-import { useReducedMotion } from "@/components/acoustic/Waveform";
+import { useReducedMotion } from "@/hooks/use-reduced-motion";
 import { FLEET, sinceLabel } from "@/lib/acoustic/data";
 import { CLASS_META } from "@/lib/acoustic/types";
 import { useAlertStore } from "@/lib/acoustic/store";
@@ -100,20 +99,13 @@ function Ops() {
           className="absolute inset-0 rounded-none border-0"
         />
 
-        <AnimatePresence>
-          {flash && !reduced && (
-            <motion.div
-              key="p0flash"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: [0, 1, 0.3, 0] }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 1.6 }}
-              aria-hidden
-              className="pointer-events-none absolute inset-0 z-40"
-              style={{ boxShadow: "inset 0 0 140px 24px var(--p0)" }}
-            />
-          )}
-        </AnimatePresence>
+        {flash && !reduced && (
+          <div
+            aria-hidden
+            className="p0-flash pointer-events-none absolute inset-0 z-40"
+            style={{ boxShadow: "inset 0 0 140px 24px var(--p0)" }}
+          />
+        )}
 
         <div aria-live="assertive" role="status" className="sr-only">
           {lastP0

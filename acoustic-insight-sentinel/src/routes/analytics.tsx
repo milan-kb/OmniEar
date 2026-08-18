@@ -1,13 +1,4 @@
 import { createFileRoute } from "@tanstack/react-router";
-import {
-  CartesianGrid,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
 import { AppShell } from "@/components/acoustic/AppShell";
 import { HEATMAP, NOISE_TREND } from "@/lib/acoustic/data";
 import { DISTRICTS } from "@/lib/acoustic/types";
@@ -49,6 +40,99 @@ function heatColor(db: number) {
   return `color-mix(in oklab, var(--p0) ${Math.round(t * 100)}%, var(--p4))`;
 }
 
+const CHART = { width: 1000, height: 300, left: 44, right: 18, top: 14, bottom: 30 };
+const DB_MIN = 40;
+const DB_MAX = 95;
+
+function chartX(index: number) {
+  return CHART.left + (index / (NOISE_TREND.length - 1)) * (CHART.width - CHART.left - CHART.right);
+}
+
+function chartY(value: number) {
+  const plotHeight = CHART.height - CHART.top - CHART.bottom;
+  return CHART.top + ((DB_MAX - value) / (DB_MAX - DB_MIN)) * plotHeight;
+}
+
+function NoiseTrendChart() {
+  const ticks = [40, 50, 60, 70, 80, 90];
+
+  return (
+    <svg
+      viewBox={`0 0 ${CHART.width} ${CHART.height}`}
+      preserveAspectRatio="none"
+      role="img"
+      aria-label="Fourteen-day mean noise trend for six Bengaluru districts"
+      className="size-full overflow-visible"
+    >
+      {ticks.map((tick) => (
+        <g key={tick}>
+          <line
+            x1={CHART.left}
+            x2={CHART.width - CHART.right}
+            y1={chartY(tick)}
+            y2={chartY(tick)}
+            stroke="rgba(255,255,255,0.07)"
+            vectorEffect="non-scaling-stroke"
+          />
+          <text
+            x={CHART.left - 9}
+            y={chartY(tick) + 4}
+            textAnchor="end"
+            fill="var(--muted-foreground)"
+            fontSize="11"
+          >
+            {tick}
+          </text>
+        </g>
+      ))}
+
+      {NOISE_TREND.map((row, index) => (
+        <text
+          key={String(row["day"])}
+          x={chartX(index)}
+          y={CHART.height - 7}
+          textAnchor="middle"
+          fill="var(--muted-foreground)"
+          fontSize="10"
+        >
+          {row["day"]}
+        </text>
+      ))}
+
+      {DISTRICTS.map((district, districtIndex) => {
+        const color = LINE_COLORS[districtIndex % LINE_COLORS.length];
+        const points = NOISE_TREND.map(
+          (row, index) => `${chartX(index)},${chartY(Number(row[district]))}`,
+        ).join(" ");
+        return (
+          <g key={district}>
+            <polyline
+              points={points}
+              fill="none"
+              stroke={color}
+              strokeWidth="2"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
+            />
+            {NOISE_TREND.map((row, index) => (
+              <circle
+                key={String(row["day"])}
+                cx={chartX(index)}
+                cy={chartY(Number(row[district]))}
+                r="7"
+                fill="transparent"
+              >
+                <title>{`${district} · ${row["day"]} · ${row[district]} dB(A)`}</title>
+              </circle>
+            ))}
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
 function Analytics() {
   return (
     <AppShell>
@@ -68,41 +152,7 @@ function Analytics() {
           <h2 className="font-display text-lg tracking-tight">14-day noise trend by district</h2>
           <p className="mono mt-1 text-[11px] text-muted-foreground">dB(A) · daily mean</p>
           <div className="mt-4 h-[320px] w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={NOISE_TREND} margin={{ top: 8, right: 8, bottom: 0, left: -18 }}>
-                <CartesianGrid stroke="rgba(255,255,255,0.06)" vertical={false} />
-                <XAxis
-                  dataKey="day"
-                  tick={{ fontSize: 11, fill: "var(--muted-foreground)" }}
-                  tickLine={false}
-                  axisLine={false}
-                />
-                <YAxis
-                  domain={[40, 95]}
-                  tick={{ fontSize: 11, fill: "var(--muted-foreground)" }}
-                  tickLine={false}
-                  axisLine={false}
-                />
-                <Tooltip
-                  contentStyle={{
-                    background: "var(--popover)",
-                    border: "1px solid var(--border)",
-                    borderRadius: 12,
-                    fontSize: 12,
-                  }}
-                />
-                {DISTRICTS.map((d, i) => (
-                  <Line
-                    key={d}
-                    type="monotone"
-                    dataKey={d}
-                    stroke={LINE_COLORS[i % LINE_COLORS.length]}
-                    strokeWidth={2}
-                    dot={false}
-                  />
-                ))}
-              </LineChart>
-            </ResponsiveContainer>
+            <NoiseTrendChart />
           </div>
           <ul className="mt-4 flex flex-wrap gap-3">
             {DISTRICTS.map((d, i) => (

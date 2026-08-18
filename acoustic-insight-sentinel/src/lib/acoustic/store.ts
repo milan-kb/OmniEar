@@ -76,7 +76,6 @@ type State = {
   socket: WebSocket | null;
   selectedId: string | null;
   lastP0: Alert | null;
-  setAlerts: (alerts: Alert[]) => void;
   push: (alert: OmniEarAlert) => void;
   connectWebSocket: () => void;
   disconnectWebSocket: () => void;
@@ -102,7 +101,6 @@ export const useAlertStore = create<State>((set, get) => ({
   socket: null,
   selectedId: null,
   lastP0: null,
-  setAlerts: (alerts) => set({ alerts }),
   push: (incoming) =>
     set((state) => {
       const alert: Alert = { ...incoming, status: "new" };
@@ -195,7 +193,3 @@ export const useAlertStore = create<State>((set, get) => ({
     set({ socket: null, connectionStatus: "closed" });
   },
 }));
-
-export function startSimulator() {
-  useAlertStore.getState().connectWebSocket();
-}

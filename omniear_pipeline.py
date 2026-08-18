@@ -10,6 +10,7 @@ Run: python omniear_pipeline.py
 """
 
 import os
+import math
 # Suppress TensorFlow/absl/CUDA log noise before importing tensorflow.
 # We run CPU-only intentionally (no GPU on this machine), so the CUDA
 # "could not find drivers" messages are expected and not useful to show.
@@ -83,7 +84,9 @@ DEBUG_LOG_ALL_CONFIDENCES = True
 # not just after -- Stage 1 detects the spike, but the interesting audio often starts
 # slightly earlier in the block.
 BUFFER_SECONDS = 3.0
-ring_buffer = collections.deque(maxlen=int(SAMPLE_RATE * BUFFER_SECONDS))
+# Store NumPy blocks rather than 48,000 individual Python floats. This keeps
+# the real-time audio callback allocation-light and avoids boxing every sample.
+ring_buffer = collections.deque(maxlen=math.ceil(BUFFER_SECONDS / 0.1))
 buffer_lock = threading.Lock()
 
 
@@ -170,10 +173,8 @@ def extract_loudest_window(waveform, window_samples):
     if n_frames == 0:
         return waveform[:window_samples]
 
-    frame_energies = np.array([
-        np.sqrt(np.mean(waveform[i * frame_size:(i + 1) * frame_size].astype(np.float64) ** 2))
-        for i in range(n_frames)
-    ])
+    frames = waveform[:n_frames * frame_size].reshape(n_frames, frame_size)
+    frame_energies = np.sqrt(np.mean(np.square(frames, dtype=np.float64), axis=1))
 
     window_frames = max(1, window_samples // frame_size)
     if n_frames <= window_frames:
@@ -203,11 +204,13 @@ def classify_audio(waveform, yamnet, classifier, classes):
     waveform (e.g. buffer underrun producing silence/NaNs) should not be
     allowed to crash the pipeline."""
     windowed = extract_loudest_window(waveform, WINDOW_SAMPLES)
-    scores, embeddings, spectrogram = yamnet(windowed)
-    clip_embedding = np.mean(embeddings.numpy(), axis=0, keepdims=True)
-    probs = classifier.predict(clip_embedding, verbose=0)[0]
-    top_idx = int(np.argmax(probs))
-    return classes[top_idx], float(probs[top_idx])
+    _, embeddings, _ = yamnet(windowed)
+    # Keep the hot path in TensorFlow. Converting embeddings to NumPy and then
+    # back to a tensor for model.predict adds copies and data-adapter overhead.
+    clip_embedding = tf.reduce_mean(embeddings, axis=0, keepdims=True)
+    probs = classifier(clip_embedding, training=False)[0]
+    top_idx = int(tf.argmax(probs).numpy())
+    return classes[top_idx], float(probs[top_idx].numpy())
 
 
 def make_alert(label, confidence):
@@ -244,11 +247,13 @@ def main():
     print(f"Connecting to dashboard at {DASHBOARD_WS_URL}...")
     dashboard = DashboardConnection(DASHBOARD_WS_URL)
 
-    inference_queue = queue.Queue()
+    # Only the newest trigger matters. Bounding this queue prevents stale audio
+    # from piling up when inference takes longer than the trigger interval.
+    inference_queue = queue.Queue(maxsize=1)
 
     def audio_ring_callback(indata, frames, time_info, status):
         with buffer_lock:
-            ring_buffer.extend(indata[:, 0].copy())
+            ring_buffer.append(indata[:, 0].copy())
 
     def on_trigger(energy, timestamp):
         # This runs on the PortAudio real-time thread -- must return FAST.
@@ -256,12 +261,26 @@ def main():
         # do NOT run YAMNet/classifier here, that would block audio capture
         # and cause dropped frames / a stale Stage 1 baseline.
         with buffer_lock:
-            waveform = np.array(ring_buffer, dtype=np.float32)
-        inference_queue.put((waveform, energy, timestamp))
+            blocks = tuple(ring_buffer)
+        item = (blocks, energy, timestamp)
+        try:
+            inference_queue.put_nowait(item)
+        except queue.Full:
+            # Replace queued stale work with the latest acoustic event.
+            try:
+                inference_queue.get_nowait()
+            except queue.Empty:
+                pass
+            inference_queue.put_nowait(item)
 
     def inference_worker():
         while True:
-            waveform, energy, timestamp = inference_queue.get()
+            blocks, energy, timestamp = inference_queue.get()
+            waveform = (
+                np.concatenate(blocks).astype(np.float32, copy=False)
+                if blocks
+                else np.empty(0, dtype=np.float32)
+            )
             print(f"\n[Stage 1] Trigger fired (energy={energy:.4f}). Running Stage 2...")
 
             if len(waveform) < SAMPLE_RATE * 0.5:

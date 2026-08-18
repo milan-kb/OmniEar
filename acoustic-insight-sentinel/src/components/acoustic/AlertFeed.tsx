@@ -1,9 +1,9 @@
-import { AnimatePresence, motion } from "framer-motion";
 import { fmtTime } from "@/lib/acoustic/data";
 import { useAlertStore } from "@/lib/acoustic/store";
 import { LABEL_META, type Alert } from "@/lib/acoustic/types";
 import { cn } from "@/lib/utils";
-import { Waveform, useReducedMotion } from "./Waveform";
+import { useReducedMotion } from "@/hooks/use-reduced-motion";
+import { Waveform } from "./Waveform";
 
 const PRIORITY_STYLES = {
   P0: { color: "var(--p0)", accent: "Critical", label: "P0" },
@@ -29,12 +29,7 @@ export function AlertRow({
   const label = LABEL_META[alert.label].label;
 
   return (
-    <motion.li
-      layout={!reduced}
-      initial={reduced ? false : { opacity: 0, x: -18, filter: "blur(6px)" }}
-      animate={{ opacity: 1, x: 0, filter: "blur(0px)" }}
-      transition={{ duration: alert.priority === "P0" ? 0.45 : 0.22, ease: "easeOut" }}
-    >
+    <li className={reduced ? undefined : "alert-row-enter"}>
       <button
         type="button"
         onClick={() => onSelect?.(alert)}
@@ -88,7 +83,7 @@ export function AlertRow({
           </span>
         </div>
       </button>
-    </motion.li>
+    </li>
   );
 }
 
@@ -120,19 +115,17 @@ export function AlertFeed({
 
   return (
     <ul className="flex flex-col gap-2 p-2">
-      <AnimatePresence initial={false}>
-        {feed.map((alert) => {
-          const key = `${alert.node_id}-${alert.timestamp}`;
-          return (
-            <AlertRow
-              key={key}
-              alert={alert}
-              {...(onSelect ? { onSelect } : {})}
-              selected={selectedId === key}
-            />
-          );
-        })}
-      </AnimatePresence>
+      {feed.map((alert) => {
+        const key = `${alert.node_id}-${alert.timestamp}`;
+        return (
+          <AlertRow
+            key={key}
+            alert={alert}
+            {...(onSelect ? { onSelect } : {})}
+            selected={selectedId === key}
+          />
+        );
+      })}
     </ul>
   );
 }

@@ -35,6 +35,7 @@ class Stage1Trigger:
         self.on_trigger = on_trigger or self._default_trigger
         self.device = device
         self.energy_history = collections.deque(maxlen=BASELINE_WINDOW)
+        self.energy_sum = 0.0
         self.last_trigger_time = 0
         self.block_count = 0
 
@@ -43,7 +44,8 @@ class Stage1Trigger:
 
     def _compute_energy(self, audio_block):
         # RMS energy of the block
-        return float(np.sqrt(np.mean(audio_block.astype(np.float32) ** 2)))
+        samples = np.asarray(audio_block, dtype=np.float32)
+        return float(np.sqrt(np.mean(np.square(samples))))
 
     def _audio_callback(self, indata, frames, time_info, status):
         if status:
@@ -55,7 +57,7 @@ class Stage1Trigger:
 
         # Need enough history before we trust the baseline
         if len(self.energy_history) >= MIN_BASELINE_BLOCKS:
-            baseline = np.mean(self.energy_history)
+            baseline = self.energy_sum / len(self.energy_history)
             threshold = max(baseline * THRESHOLD_MULTIPLIER, MIN_ABSOLUTE_ENERGY)
 
             now = time.time()
@@ -67,7 +69,10 @@ class Stage1Trigger:
         # Occasional loud blocks slightly nudging the baseline is fine and self-corrects
         # within BASELINE_WINDOW blocks; the MIN_ABSOLUTE_ENERGY floor above prevents
         # the degenerate case where baseline collapses toward zero.
+        if len(self.energy_history) == self.energy_history.maxlen:
+            self.energy_sum -= self.energy_history[0]
         self.energy_history.append(energy)
+        self.energy_sum += energy
 
     def run(self, duration=None):
         """Start listening. Blocks until duration expires or KeyboardInterrupt."""

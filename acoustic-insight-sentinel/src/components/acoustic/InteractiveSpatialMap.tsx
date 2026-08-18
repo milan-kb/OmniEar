@@ -38,7 +38,11 @@ function MapCoordinator({
   nodes,
   selectedNodeId,
   mapPaddingLeft = 0,
-}: Pick<SpatialMapProps, "nodes" | "selectedNodeId" | "mapPaddingLeft">) {
+}: {
+  nodes: NodeUnit[];
+  selectedNodeId: number | null | undefined;
+  mapPaddingLeft: number | undefined;
+}) {
   const map = useMap();
 
   useEffect(() => {

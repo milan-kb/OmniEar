@@ -1,8 +1,8 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   Outlet,
   Link,
-  createRootRouteWithContext,
+  createRootRoute,
+  useRouterState,
   useRouter,
   HeadContent,
   Scripts,
@@ -69,7 +69,7 @@ function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
   );
 }
 
-export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()({
+export const Route = createRootRoute({
   head: () => ({
     meta: [
       { charSet: "utf-8" },
@@ -121,25 +121,26 @@ function RootShell({ children }: { children: ReactNode }) {
 }
 
 function RootComponent() {
-  const { queryClient } = Route.useRouteContext();
-
   return (
-    <QueryClientProvider client={queryClient}>
+    <>
       <LiveAlertConnection />
       {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
       <Outlet />
-    </QueryClientProvider>
+    </>
   );
 }
 
 function LiveAlertConnection() {
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
   const connectWebSocket = useAlertStore((state) => state.connectWebSocket);
   const disconnectWebSocket = useAlertStore((state) => state.disconnectWebSocket);
+  const needsLiveFeed = pathname === "/ops" || pathname === "/map";
 
   useEffect(() => {
+    if (!needsLiveFeed) return;
     connectWebSocket();
     return disconnectWebSocket;
-  }, [connectWebSocket, disconnectWebSocket]);
+  }, [connectWebSocket, disconnectWebSocket, needsLiveFeed]);
 
   return null;
 }
