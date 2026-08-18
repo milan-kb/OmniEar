@@ -31,6 +31,7 @@ SESA_ZIP_URL = "https://zenodo.org/records/3519845/files/SESA.zip"
 
 # ESC-50 classes we care about, mapped to our target classes
 ESC50_CLASS_MAP = {
+    "fireworks": "explosion",
     "glass_breaking": "impact_crash",
     "siren": "siren_traffic",
     "car_horn": "siren_traffic",
@@ -44,6 +45,15 @@ ESC50_CLASS_MAP = {
     "coughing": "background",
     "door_wood_knock": "background",
     "vacuum_cleaner": "background",
+    # Loud hard negatives that are commonly confused with demo threats.
+    "thunderstorm": "background",
+    "clock_alarm": "background",
+    "church_bells": "background",
+    "laughing": "background",
+    "rooster": "background",
+    "dog": "background",
+    "cat": "background",
+    "hand_saw": "background",
 }
 
 
@@ -121,11 +131,15 @@ def organize_sesa():
     }
 
     count = 0
-    for split in ["train", "test"]:
-        split_dir = os.path.join(sesa_root, split)
-        if not os.path.exists(split_dir):
+    # The current Zenodo archive is nested as SESA/SESA/{train,test}, while
+    # older releases placed the split folders directly at the root. Walking
+    # makes the downloader work with both layouts and removes the need for a
+    # separate one-off repair step.
+    for split_dir, _, filenames in os.walk(sesa_root):
+        split = os.path.basename(split_dir).lower()
+        if split not in {"train", "test"}:
             continue
-        for fname in os.listdir(split_dir):
+        for fname in filenames:
             if not fname.lower().endswith(".wav"):
                 continue
             lower_name = fname.lower()

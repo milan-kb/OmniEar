@@ -1,8 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -e
 
-PROJECT_DIR="$HOME/projects/omniear"
+PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 FRONTEND_DIR="$PROJECT_DIR/acoustic-insight-sentinel"
 
 RELAY_PID=""
@@ -10,88 +10,50 @@ FRONTEND_PID=""
 PIPELINE_PID=""
 
 cleanup() {
-    echo ""
-    echo "🛑 Stopping OmniEar..."
-
-    if [[ -n "$RELAY_PID" ]]; then
-        kill -TERM -- "-$RELAY_PID" 2>/dev/null || true
-    fi
-
-    if [[ -n "$FRONTEND_PID" ]]; then
-        kill -TERM -- "-$FRONTEND_PID" 2>/dev/null || true
-    fi
-
-    if [[ -n "$PIPELINE_PID" ]]; then
-        kill -TERM -- "-$PIPELINE_PID" 2>/dev/null || true
-    fi
-
-    sleep 1
-
-    echo "✅ OmniEar stopped."
+    echo
+    echo "Stopping OmniEar..."
+    for pid in "$RELAY_PID" "$FRONTEND_PID" "$PIPELINE_PID"; do
+        if [[ -n "$pid" ]]; then
+            kill -TERM -- "-$pid" 2>/dev/null || true
+        fi
+    done
+    echo "OmniEar stopped."
 }
 
-# Clean up when Ctrl+C, terminal close, or script exit happens
 trap cleanup EXIT
 trap 'exit 130' INT TERM TSTP
 
+if [[ ! -f "$PROJECT_DIR/venv/bin/activate" ]]; then
+    echo "Missing venv. Create it and install requirements first."
+    exit 1
+fi
+if [[ ! -d "$FRONTEND_DIR" ]]; then
+    echo "Missing dashboard directory: $FRONTEND_DIR"
+    exit 1
+fi
+
 cd "$PROJECT_DIR"
-
-echo "🚀 Starting OmniEar..."
-echo ""
-
-# Python environment
 source "$PROJECT_DIR/venv/bin/activate"
 
-# ─────────────────────────────────────
-# Relay server
-# ─────────────────────────────────────
-
-echo "📡 Starting relay server..."
-
+echo "Starting relay server..."
 setsid python relay_server.py &
 RELAY_PID=$!
 
-# ─────────────────────────────────────
-# Frontend
-# ─────────────────────────────────────
-
-echo "🌐 Starting dashboard..."
-
+echo "Starting dashboard..."
 cd "$FRONTEND_DIR"
-
 setsid npm run dev &
 FRONTEND_PID=$!
 
-# ─────────────────────────────────────
-# Detection pipeline
-# ─────────────────────────────────────
-
-echo "🧠 Starting OmniEar pipeline..."
-
+echo "Starting OmniEar pipeline..."
 cd "$PROJECT_DIR"
-
 setsid python omniear_pipeline.py &
 PIPELINE_PID=$!
 
-# Give services a moment to start
 sleep 2
-
-echo ""
-echo "========================================"
-echo "          🎧 OMNIEAR RUNNING"
-echo "========================================"
-echo ""
-echo "📡 Relay:      ws://localhost:8765"
-echo "🧠 Pipeline:   PID $PIPELINE_PID"
-echo "🌐 Dashboard:  http://localhost:5173"
-echo ""
-echo "========================================"
-echo "Open the dashboard:"
-echo "👉 http://localhost:5173"
-echo "========================================"
-echo ""
+echo
+echo "OmniEar is running"
+echo "Dashboard: http://localhost:5173"
+echo "Relay:     ws://localhost:8765"
 echo "Press Ctrl+C to stop everything."
-echo ""
 
-# Keep script alive
 wait

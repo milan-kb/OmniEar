@@ -11,6 +11,7 @@ Run: python omniear_pipeline.py
 
 import os
 import math
+import csv
 # Suppress TensorFlow/absl/CUDA log noise before importing tensorflow.
 # We run CPU-only intentionally (no GPU on this machine), so the CUDA
 # "could not find drivers" messages are expected and not useful to show.
@@ -33,7 +34,13 @@ import tensorflow_hub as hub
 import websockets
 import requests
 
+from audio_utils import extract_loudest_window, pool_embedding_frames
 from stage1_trigger import Stage1Trigger, SAMPLE_RATE
+from threat_fusion import (
+    aggregate_yamnet_evidence,
+    build_yamnet_index_groups,
+    fuse_predictions,
+)
 
 # ---- Config ----
 # Must match WINDOW_SECONDS in extract_embeddings.py -- training and live
@@ -42,6 +49,9 @@ from stage1_trigger import Stage1Trigger, SAMPLE_RATE
 # was trained on.
 WINDOW_SECONDS = 2.5
 WINDOW_SAMPLES = int(SAMPLE_RATE * WINDOW_SECONDS)
+# Stage 1 fires on the first loud 100ms block. Waiting here is essential: an
+# immediate snapshot contains almost entirely audio from before the event.
+POST_TRIGGER_SECONDS = 1.25
 MODEL_PATH = "models/classifier.keras"
 CLASSES_PATH = "models/classes.json"
 NODE_ID = "AE-01"
@@ -66,36 +76,24 @@ PRIORITY_MAP = {
 # points from the confusion matrix (background was frequently misread as impact_crash
 # and siren_traffic).
 CONFIDENCE_THRESHOLDS = {
-    "scream_distress": 0.40,   # lowered from 0.55 for earphone mic demo conditions
-    "explosion": 0.45,         # lowered from 0.60
-    "impact_crash": 0.45,      # lowered from 0.65
-    "siren_traffic": 0.45,     # lowered from 0.65
-}
-
-# Inference-time calibration to counteract training class weight bias.
-# train_classifier.py used compute_class_weight("balanced"), which gave:
-#   background ~0.4x, scream ~0.6x, siren ~2x, explosion ~10x, impact ~11x
-# This makes the model aggressively predict minority classes on ambiguous /
-# out-of-distribution input (like speaker-to-mic captured YouTube audio).
-# These correction factors re-balance inference toward the true class prior.
-# Multiply raw softmax probabilities by these, then renormalize.
-CLASS_CALIBRATION = {
-    "background":      2.5,    # was down-weighted in training, boost back up
-    "scream_distress": 1.0,    # roughly balanced already
-    "siren_traffic":   0.5,    # was over-weighted ~2x in training
-    "explosion":       0.25,   # was over-weighted ~10x in training
-    "impact_crash":    0.25,   # was over-weighted ~11x in training
+    # These conservative alert gates are based on the final model's untouched
+    # background errors. Classification is still printed below the threshold,
+    # but ambiguous results no longer become dashboard/Pi alerts.
+    "scream_distress": 0.52,
+    "explosion": 0.65,
+    "impact_crash": 0.69,
+    "siren_traffic": 0.80,
 }
 
 # Set True temporarily while calibrating thresholds against your actual demo
-# playback setup (phone speaker, room, distance). Prints all class
-# probabilities (raw + calibrated) on every trigger for live debugging.
+# playback setup (phone speaker, room, distance). Just changes what gets
+# printed -- does not affect whether alerts actually fire.
 DEBUG_LOG_ALL_CONFIDENCES = True
 
 # Rolling audio buffer so we can grab audio from just BEFORE the trigger fired too,
 # not just after -- Stage 1 detects the spike, but the interesting audio often starts
 # slightly earlier in the block.
-BUFFER_SECONDS = 3.0
+BUFFER_SECONDS = 3.5
 # Store NumPy blocks rather than 48,000 individual Python floats. This keeps
 # the real-time audio callback allocation-light and avoids boxing every sample.
 ring_buffer = collections.deque(maxlen=math.ceil(BUFFER_SECONDS / 0.1))
@@ -119,6 +117,17 @@ def notify_pi_led(alert_dict):
 def load_classes():
     with open(CLASSES_PATH) as f:
         return json.load(f)
+
+
+def load_yamnet_class_names(yamnet):
+    """Read the 521 display names bundled with the loaded TF Hub model."""
+    class_map_path = yamnet.class_map_path().numpy()
+    if isinstance(class_map_path, bytes):
+        class_map_path = class_map_path.decode("utf-8")
+    with tf.io.gfile.GFile(class_map_path) as class_map_file:
+        reader = csv.reader(class_map_file)
+        next(reader)
+        return [row[2] for row in reader]
 
 
 class DashboardConnection:
@@ -168,74 +177,53 @@ class DashboardConnection:
             print(f"[Dashboard] Send failed: {exc}")
 
 
-def extract_loudest_window(waveform, window_samples):
-    """
-    Same logic as extract_embeddings.py's version -- pick the window_samples-long
-    slice centered on the loudest region. Must stay in sync with that function
-    so training and inference see comparably-processed audio.
-    """
-    if len(waveform) <= window_samples:
-        pad = window_samples - len(waveform)
-        pad_left = pad // 2
-        pad_right = pad - pad_left
-        return np.pad(waveform, (pad_left, pad_right), mode="constant")
-
-    frame_size = SAMPLE_RATE // 10
-    n_frames = len(waveform) // frame_size
-    if n_frames == 0:
-        return waveform[:window_samples]
-
-    frames = waveform[:n_frames * frame_size].reshape(n_frames, frame_size)
-    frame_energies = np.sqrt(np.mean(np.square(frames, dtype=np.float64), axis=1))
-
-    window_frames = max(1, window_samples // frame_size)
-    if n_frames <= window_frames:
-        center_frame = n_frames // 2
-    else:
-        cumsum = np.cumsum(np.insert(frame_energies, 0, 0))
-        window_sums = cumsum[window_frames:] - cumsum[:-window_frames]
-        best_start_frame = int(np.argmax(window_sums))
-        center_frame = best_start_frame + window_frames // 2
-
-    center_sample = center_frame * frame_size
-    start = max(0, center_sample - window_samples // 2)
-    end = start + window_samples
-    if end > len(waveform):
-        end = len(waveform)
-        start = max(0, end - window_samples)
-
-    windowed = waveform[start:end]
-    if len(windowed) < window_samples:
-        windowed = np.pad(windowed, (0, window_samples - len(windowed)), mode="constant")
-    return windowed
+def _format_scores(values, classes, limit=5):
+    top = np.argsort(values)[::-1][:limit]
+    return ", ".join(f"{classes[i]}={float(values[i]):.3f}" for i in top)
 
 
-def classify_audio(waveform, yamnet, classifier, classes):
+def classify_audio(waveform, yamnet, classifier, classes, yamnet_index_groups=None):
     """Run YAMNet + classifier on a waveform, return (label, confidence).
-    Applies inference-time calibration to counteract training class weight
-    bias, then returns (label, calibrated_confidence).
     Raises on failure -- caller is responsible for catching, since a bad
     waveform (e.g. buffer underrun producing silence/NaNs) should not be
     allowed to crash the pipeline."""
-    windowed = extract_loudest_window(waveform, WINDOW_SAMPLES)
-    _, embeddings, _ = yamnet(windowed)
-    clip_embedding = tf.reduce_mean(embeddings, axis=0, keepdims=True)
-    raw_probs = classifier(clip_embedding, training=False)[0].numpy()
+    windowed = extract_loudest_window(waveform, WINDOW_SAMPLES, SAMPLE_RATE)
+    yamnet_scores, embeddings, _ = yamnet(windowed)
+    embedding_frames = embeddings.numpy()
 
-    # Apply calibration: multiply each class probability by its correction
-    # factor, then renormalize so they still sum to 1.0.
-    cal_weights = np.array([CLASS_CALIBRATION.get(c, 1.0) for c in classes], dtype=np.float32)
-    calibrated = raw_probs * cal_weights
-    calibrated = calibrated / calibrated.sum()
+    # New models use mean+max+std (3072 inputs), while the checked-in legacy
+    # model uses mean only (1024). This lets the improved live path work now and
+    # upgrades automatically after extract_embeddings.py + training are rerun.
+    model_input_dim = int(classifier.input_shape[-1])
+    clip_feature = pool_embedding_frames(embedding_frames, output_dim=model_input_dim)
+    clip_probs = classifier(clip_feature[None, :], training=False)[0].numpy()
+
+    # The legacy model can also score each 0.96s YAMNet frame. Top-two temporal
+    # pooling stops a brief event from being averaged into background.
+    frame_probs = None
+    if model_input_dim == embedding_frames.shape[1]:
+        frame_probs = classifier(embedding_frames, training=False).numpy()
+
+    evidence = np.zeros(len(classes), dtype=np.float32)
+    if yamnet_index_groups:
+        evidence = aggregate_yamnet_evidence(
+            yamnet_scores.numpy(), yamnet_index_groups, classes
+        )
+
+    probs, details = fuse_predictions(clip_probs, frame_probs, evidence, classes)
+    top_idx = int(np.argmax(probs))
 
     if DEBUG_LOG_ALL_CONFIDENCES:
-        print("[Stage 2] Class probabilities (raw -> calibrated):")
-        for i, c in enumerate(classes):
-            marker = "  <<<" if i == int(np.argmax(calibrated)) else ""
-            print(f"    {c:20s}  {raw_probs[i]:.4f} -> {calibrated[i]:.4f}{marker}")
+        print(f"[Debug] learned: {_format_scores(details['learned'], classes)}")
+        if details["yamnet_weight"] > 0:
+            print(
+                f"[Debug] YAMNet evidence: "
+                f"{_format_scores(details['yamnet_evidence'], classes, limit=4)} "
+                f"(fusion weight={details['yamnet_weight']:.2f})"
+            )
+        print(f"[Debug] fused: {_format_scores(probs, classes)}")
 
-    top_idx = int(np.argmax(calibrated))
-    return classes[top_idx], float(calibrated[top_idx])
+    return classes[top_idx], float(probs[top_idx])
 
 
 def make_alert(label, confidence):
@@ -265,8 +253,18 @@ def main():
     print("Loading YAMNet...")
     yamnet = hub.load("https://tfhub.dev/google/yamnet/1")
     print("Loading classifier...")
-    classifier = tf.keras.models.load_model(MODEL_PATH)
+    classifier = tf.keras.models.load_model(MODEL_PATH, compile=False)
     classes = load_classes()
+    try:
+        yamnet_class_names = load_yamnet_class_names(yamnet)
+        yamnet_index_groups = build_yamnet_index_groups(yamnet_class_names)
+        mapped_count = sum(len(indices) for indices in yamnet_index_groups.values())
+        print(f"Loaded {mapped_count} YAMNet threat-label mappings.")
+    except Exception as exc:
+        # The custom classifier remains fully usable if a future TF Hub export
+        # changes how the class-map asset is exposed.
+        yamnet_index_groups = {}
+        print(f"Could not load YAMNet class map ({exc}); using custom classifier only.")
     print(f"Classes: {classes}\n")
 
     print(f"Connecting to dashboard at {DASHBOARD_WS_URL}...")
@@ -275,28 +273,52 @@ def main():
     # Only the newest trigger matters. Bounding this queue prevents stale audio
     # from piling up when inference takes longer than the trigger interval.
     inference_queue = queue.Queue(maxsize=1)
+    capture_state_lock = threading.Lock()
+    capture_state = {"pending": False, "energy": 0.0, "timestamp": 0.0}
 
     def audio_ring_callback(indata, frames, time_info, status):
         with buffer_lock:
             ring_buffer.append(indata[:, 0].copy())
 
-    def on_trigger(energy, timestamp):
-        # This runs on the PortAudio real-time thread -- must return FAST.
-        # Snapshot the buffer and hand off to the inference worker thread;
-        # do NOT run YAMNet/classifier here, that would block audio capture
-        # and cause dropped frames / a stale Stage 1 baseline.
-        with buffer_lock:
-            blocks = tuple(ring_buffer)
-        item = (blocks, energy, timestamp)
+    def enqueue_latest(item):
+        """Put an event on the bounded queue, replacing stale unprocessed work."""
         try:
             inference_queue.put_nowait(item)
+            return
         except queue.Full:
-            # Replace queued stale work with the latest acoustic event.
-            try:
-                inference_queue.get_nowait()
-            except queue.Empty:
-                pass
-            inference_queue.put_nowait(item)
+            pass
+        try:
+            inference_queue.get_nowait()
+        except queue.Empty:
+            pass
+        inference_queue.put_nowait(item)
+
+    def finish_event_capture():
+        # Called by a timer, never by PortAudio's real-time callback.
+        with buffer_lock:
+            blocks = tuple(ring_buffer)
+        with capture_state_lock:
+            energy = capture_state["energy"]
+            timestamp = capture_state["timestamp"]
+            capture_state["pending"] = False
+        enqueue_latest((blocks, energy, timestamp))
+
+    def on_trigger(energy, timestamp):
+        # This runs on the PortAudio real-time thread and must return quickly.
+        # Delay the snapshot so it contains the event after its first spike.
+        with capture_state_lock:
+            if capture_state["pending"]:
+                capture_state["energy"] = max(capture_state["energy"], energy)
+                return
+            capture_state.update(pending=True, energy=energy, timestamp=timestamp)
+
+        print(
+            f"\n[Stage 1] Trigger fired (energy={energy:.4f}). "
+            f"Capturing {POST_TRIGGER_SECONDS:.2f}s of event audio..."
+        )
+        capture_timer = threading.Timer(POST_TRIGGER_SECONDS, finish_event_capture)
+        capture_timer.daemon = True
+        capture_timer.start()
 
     def inference_worker():
         while True:
@@ -306,14 +328,20 @@ def main():
                 if blocks
                 else np.empty(0, dtype=np.float32)
             )
-            print(f"\n[Stage 1] Trigger fired (energy={energy:.4f}). Running Stage 2...")
+            print(f"[Stage 2] Running classification (peak energy={energy:.4f})...")
 
             if len(waveform) < SAMPLE_RATE * 0.5:
                 print("[Stage 2] Not enough audio buffered yet, skipping.")
                 continue
 
             try:
-                label, confidence = classify_audio(waveform, yamnet, classifier, classes)
+                label, confidence = classify_audio(
+                    waveform,
+                    yamnet,
+                    classifier,
+                    classes,
+                    yamnet_index_groups=yamnet_index_groups,
+                )
             except Exception as e:
                 print(f"[Stage 2] Classification failed ({e}), skipping this trigger.")
                 continue
@@ -326,10 +354,7 @@ def main():
                 dashboard.send_alert(alert)
                 threading.Thread(target=notify_pi_led, args=(alert,), daemon=True).start()
             else:
-                if label == "background":
-                    print("[Stage 2] Classified as background, no alert generated.")
-                else:
-                    print(f"[Stage 2] {label} below confidence threshold, no alert generated.")
+                print("[Stage 2] No alert emitted.")
 
     threading.Thread(target=inference_worker, daemon=True).start()
 

@@ -13,6 +13,10 @@ scream3 (scream-dataset):
     flat + nested folder, .wav/.ogg/.aiff, scream-only (no negative class)
     -> all go to scream_distress
 
+NIGENS (official general sound-events corpus):
+    NIGENS_selected/NIGENS/{femaleScream,maleScream}/*.wav
+    -> scream_distress
+
 Non-WAV files (.ogg, .aiff) are converted to .wav using soundfile/librosa
 so the rest of the pipeline (which expects WAV) can use them directly.
 
@@ -100,6 +104,19 @@ def main():
     print("Organizing scream3 (scream-only, mixed formats)...")
     n5 = organize_folder("data/_raw/scream3", "scream_distress", "s3")
     print(f"  scream3: +{n5} (converted where needed)")
+
+    print("Organizing NIGENS female/male scream classes...")
+    n6 = organize_folder(
+        "data/_raw/NIGENS_selected/NIGENS/femaleScream",
+        "scream_distress",
+        "nigens_f",
+    )
+    n7 = organize_folder(
+        "data/_raw/NIGENS_selected/NIGENS/maleScream",
+        "scream_distress",
+        "nigens_m",
+    )
+    print(f"  NIGENS female: +{n6}, male: +{n7}")
 
     print_summary()
 

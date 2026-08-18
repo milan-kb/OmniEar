@@ -4,6 +4,7 @@ numpy
 scipy
 sounddevice
 websockets
+requests
 soundfile
 librosa
 scikit-learn
