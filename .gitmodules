@@ -1,4 +1,0 @@
-[submodule "acoustic-insight-sentinel"]
-	path = acoustic-insight-sentinel
-	url = https://github.com/albertjaison18/acoustic-insight-sentinel.git
-	branch = main

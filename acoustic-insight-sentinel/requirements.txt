@@ -1,0 +1,7 @@
+Runtime requirements for the AcousticEdge frontend
+
+Node.js >= 20
+npm >= 10
+
+Install JavaScript dependencies with: npm install
+Configure VITE_WS_URL in .env to receive live OmniEar pipeline alerts.
