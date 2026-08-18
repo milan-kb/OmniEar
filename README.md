@@ -2,7 +2,7 @@
 
 Edge-AI acoustic threat detection — listens for distress/emergency sounds (screams, explosions, impacts, sirens) and generates structured alerts without ever recording or transmitting raw audio.
 
-Built for [hackathon name] as a technical proof-of-concept demonstrating the core detection pipeline from OmniEar's PRD.
+Built for [hackathon name] as a technical proof-of-concept demonstrating the core detection pipeline from AcousticEdge / OmniEar's PRD.
 
 ## Architecture
 
@@ -86,26 +86,31 @@ python extract_embeddings.py      # caches YAMNet embeddings -> data/embeddings.
 python train_classifier.py        # trains classifier -> models/classifier.keras
 ```
 
-**3. Run the live pipeline:**
+**3. Run the full system:**
 ```bash
-# Terminal 1 - WebSocket relay used by the included frontend
-python mock_dashboard_listener.py
+# Terminal 1 - relay server (broker between pipeline and dashboard)
+python relay_server.py
 
-# Terminal 2 - frontend (from acoustic-insight-sentinel)
+# Terminal 2 - the frontend dashboard
+cd acoustic-insight-sentinel
+npm install   # first time only
 npm run dev
 
-# Terminal 3 - the actual pipeline
+# Terminal 3 - the actual detection pipeline
 python omniear_pipeline.py
 ```
+
+Open the dashboard at the URL `npm run dev` prints (typically `http://localhost:5173`).
+`relay_server.py` must be running first — both the pipeline and the browser
+dashboard connect to it as WebSocket clients, and it broadcasts each alert
+from the pipeline out to the dashboard.
 
 ## Known limitations (honest, per PRD Section 10)
 
 - False-positive rates not yet validated against chaotic real-world Indian soundscapes (festival noise, street vendors, etc.) — validated only against clean dataset audio and live personal testing so far.
 - `impact_crash` and `siren_traffic` classes have less training data than `background`/`scream_distress` even after augmentation; precision is improving but not yet production-grade.
 - Hardware (ESP32/Pi node, GSM, solar) is not implemented for this demo — the pipeline runs on a laptop as a stand-in for the edge node, per architectural discussion in the PRD.
-- The included dashboard receives live JSON alerts through `mock_dashboard_listener.py`, which
-  relays messages from the pipeline client to browser clients. Physical LED/hardware triggers are
-  not implemented.
+- Dashboard is a real, working frontend (`acoustic-insight-sentinel/`, submodule) connected via `relay_server.py` — not a mock. Physical LED/hardware trigger integration with person2's Pi is still pending real-world IP exchange at the venue.
 
 ## Team
 
