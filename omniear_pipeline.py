@@ -30,6 +30,7 @@ import sounddevice as sd
 import tensorflow as tf
 import tensorflow_hub as hub
 import websockets
+import requests
 
 from stage1_trigger import Stage1Trigger, SAMPLE_RATE
 
@@ -46,6 +47,8 @@ NODE_ID = "AE-01"
 DEMO_LAT = 12.9716              # hardcoded demo coordinates
 DEMO_LNG = 77.5946
 DASHBOARD_WS_URL = "ws://localhost:8765"  # change to person1's server when ready
+PI_LED_URL = "http://10.214.188.69:5000/trigger"  # confirmed working with person2's Pi
+PI_LED_ENABLED = True  # set False to disable Pi calls entirely if hardware isn't ready
 
 # Priority mapping per PRD -- adjust class names if yours differ
 PRIORITY_MAP = {
@@ -64,9 +67,17 @@ PRIORITY_MAP = {
 CONFIDENCE_THRESHOLDS = {
     "scream_distress": 0.55,   # high recall/precision already, keep bar low
     "explosion": 0.60,
-    "impact_crash": 0.75,      # weak precision (50%), raise the bar significantly
-    "siren_traffic": 0.70,     # weak precision (65%), raise the bar
+    "impact_crash": 0.65,      # lowered from 0.75 -- live testing showed correct
+                                # classifications consistently landing 0.65-0.74,
+                                # getting needlessly suppressed
+    "siren_traffic": 0.65,     # lowered from 0.70 for the same reason, pending
+                                # live validation
 }
+
+# Set True temporarily while calibrating thresholds against your actual demo
+# playback setup (phone speaker, room, distance). Just changes what gets
+# printed -- does not affect whether alerts actually fire.
+DEBUG_LOG_ALL_CONFIDENCES = True
 
 # Rolling audio buffer so we can grab audio from just BEFORE the trigger fired too,
 # not just after -- Stage 1 detects the spike, but the interesting audio often starts
@@ -74,6 +85,20 @@ CONFIDENCE_THRESHOLDS = {
 BUFFER_SECONDS = 3.0
 ring_buffer = collections.deque(maxlen=int(SAMPLE_RATE * BUFFER_SECONDS))
 buffer_lock = threading.Lock()
+
+
+def notify_pi_led(alert_dict):
+    """Send the alert to the Pi's LED trigger endpoint. Runs in its own thread
+    so a slow/unreachable Pi (bad wifi, server not started, wrong IP) never
+    blocks or crashes the main pipeline -- this is a nice-to-have physical
+    prop, not a critical path."""
+    if not PI_LED_ENABLED:
+        return
+    try:
+        requests.post(PI_LED_URL, json=alert_dict, timeout=1.5)
+        print("[Pi] LED trigger sent.")
+    except requests.exceptions.RequestException as e:
+        print(f"[Pi] LED trigger failed ({e}), continuing without it.")
 
 
 def load_classes():
@@ -255,6 +280,7 @@ def main():
             if alert:
                 print(f"[ALERT] {json.dumps(alert)}")
                 dashboard.send_alert(alert)
+                threading.Thread(target=notify_pi_led, args=(alert,), daemon=True).start()
             else:
                 print("[Stage 2] Classified as background, no alert generated.")
 
